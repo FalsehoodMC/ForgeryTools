@@ -1,0 +1,33 @@
+plugins {
+	id 'com.github.johnrengelman.shadow' version '6.1.0'
+	id 'java-library'
+	id 'maven-publish'
+}
+
+group = 'com.unascribed'
+archivesBaseName = 'Forgery'
+version = '0.0.1'
+
+sourceCompatibility = targetCompatibility = 8
+
+repositories { 
+	mavenCentral()
+}
+
+configurations.shadow.extendsFrom configurations.compile
+
+dependencies {
+	compile 'com.grack:nanojson:1.6'
+	compile 'org.ow2.asm:asm:9.0'
+	compile project('tiny-mappings-parser')
+	compile project('SrgUtils')
+}
+
+jar {
+	manifest {
+		attributes (
+			'Main-Class': 'com.unascribed.forgery.Forgery'
+		)
+	}
+}
+
