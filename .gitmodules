@@ -1,6 +1,3 @@
-[submodule "tiny-mappings-parser"]
-	path = tiny-mappings-parser
-	url = https://github.com/FabricMC/tiny-mappings-parser.git
 [submodule "SrgUtils"]
 	path = SrgUtils
 	url = https://github.com/MinecraftForge/SrgUtils.git
