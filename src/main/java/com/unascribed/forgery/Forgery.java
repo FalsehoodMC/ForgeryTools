@@ -1,10 +1,40 @@
+/**
+ * Cursed Software License
+ * 
+ * Copyright (c) 2020 Una Thompson (unascribed)
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * You shall not credit the original author(s), except as is required for the
+ * inclusion of this copyright notice.
+ * 
+ * You understand that this Software is stricken with a terrible curse and what it
+ * does is not known by the copyright holder(s) and they accept no responsibility
+ * for its effects.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ * 
+ */
 package com.unascribed.forgery;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -19,28 +49,34 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.jar.Attributes;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import org.cadixdev.atlas.Atlas;
 import org.cadixdev.atlas.util.NIOHelper;
+import org.cadixdev.bombe.analysis.InheritanceProvider;
 import org.cadixdev.bombe.jar.JarClassEntry;
 import org.cadixdev.bombe.jar.JarEntryTransformer;
 import org.cadixdev.bombe.jar.JarManifestEntry;
 import org.cadixdev.bombe.jar.JarResourceEntry;
 import org.cadixdev.bombe.jar.asm.JarEntryRemappingTransformer;
+import org.cadixdev.bombe.type.ArrayType;
+import org.cadixdev.bombe.type.FieldType;
+import org.cadixdev.bombe.type.MethodDescriptor;
+import org.cadixdev.bombe.type.MethodDescriptorReader;
+import org.cadixdev.bombe.type.ObjectType;
 import org.cadixdev.bombe.type.signature.FieldSignature;
 import org.cadixdev.bombe.type.signature.MethodSignature;
 import org.cadixdev.lorenz.MappingSet;
 import org.cadixdev.lorenz.io.srg.tsrg.TSrgReader;
-import org.cadixdev.lorenz.io.srg.tsrg.TSrgWriter;
 import org.cadixdev.lorenz.merge.FieldMergeStrategy;
 import org.cadixdev.lorenz.merge.MappingSetMerger;
 import org.cadixdev.lorenz.merge.MergeConfig;
 import org.cadixdev.lorenz.merge.MethodMergeStrategy;
 import org.cadixdev.lorenz.model.ClassMapping;
 import org.cadixdev.lorenz.model.FieldMapping;
-import org.cadixdev.lorenz.model.InnerClassMapping;
 import org.cadixdev.lorenz.model.MethodMapping;
 import org.cadixdev.lorenz.model.TopLevelClassMapping;
 import org.objectweb.asm.ClassReader;
@@ -69,16 +105,19 @@ import net.fabricmc.mapping.tree.TinyMappingFactory;
 public class Forgery {
 
 	public static void main(String[] args) throws IOException, JsonParserException {
-		System.err.println("Forgery v0.0.1");
+		System.err.println("Forgery v0.1.0");
 		System.err.println("NOTICE: Forgery is NOT a silver bullet. It is not a magical Fabric-to-Forge converter. For a mod to successfully convert with Forgery, it must have changes made to it to work on both loaders. Forgery simply facilitates remapping and has a few runtime helpers.");
-		if (args.length != 6) {
-			System.err.println("Forgery requires four arguments. Input Fabric mod, output Forge mod, Intermediary tiny mappings, MCP mcp_mappings.tsrg, Forgery runtime JAR, Intermediary remapped Minecraft JAR.");
+		if (args.length != 7) {
+			System.err.println("Forgery requires seven arguments. Input Fabric mod, output Forge mod, Intermediary tiny mappings, MCP mcp_mappings.tsrg, Forgery runtime JAR, Intermediary remapped Minecraft JAR, package name.");
 			System.err.println("You can find the Intermediary mappings in ~/.gradle/caches/fabric-loom/mappings/intermediary-1.16.4-v2.tiny");
 			System.err.println("You can find the MCP joined.tsrg in ~/.gradle/caches/forge_gradle/minecraft_repo/versions/1.16.4/mcp_mappings.tsrg");
 			System.err.println("You can find the Intermediary remapped Minecraft jar in ~/.gradle/caches/fabric-loom/minecraft-1.16.4-intermediary-net.fabricmc.yarn-1.16.4+build.6-v2.jar");
+			System.err.println("Building Fabrication and the Forgery runtime should be enough to make all these files appear.");
 			System.exit(1);
 			return;
 		}
+		String pkg = args[6].replace('/', '.');
+		String pkgBin = pkg.replace('.', '/');
 		ZipFile in = new ZipFile(args[0]);
 		if (in.getEntry("fabric.mod.json") == null) {
 			System.err.println(args[0]+" doesn't look like a Fabric mod.");
@@ -101,30 +140,19 @@ public class Forgery {
 				.withMethodMergeStrategy(MethodMergeStrategy.LOOSE)
 				.withFieldMergeStrategy(FieldMergeStrategy.LOOSE)
 				.build()).merge();
-		new TSrgWriter(new FileWriter("merged.tsrg")).write(intToSrg);
+//		new TSrgWriter(new FileWriter("merged.tsrg")).write(intToSrg);
 		MappingSet srgToInt = intToSrg.reverse();
 		intToSrg.createTopLevelClassMapping("net/fabricmc/api/Environment", "net/minecraftforge/api/distmarker/OnlyIn");
 		TopLevelClassMapping envType = intToSrg.createTopLevelClassMapping("net/fabricmc/api/EnvType", "net/minecraftforge/api/distmarker/Dist");
 		envType.createFieldMapping("SERVER", "DEDICATED_SERVER");
+		intToSrg.createTopLevelClassMapping("io.github.prospector.modmenu.api.ModMenuApi", pkg+".ModMenuAdapter");
+		intToSrg.createTopLevelClassMapping("io.github.prospector.modmenu.api.ConfigScreenFactory", pkg+".ConfigScreenFactory");
 		System.out.println("Remapping...");
 		Atlas a = new Atlas();
 		a.getClasspath().add(new File(args[5]).toPath());
 		a.install(ctx -> {
 			for (TopLevelClassMapping tlcm : srgToInt.getTopLevelClassMappings()) {
-				tlcm.complete(ctx.inheritanceProvider());
-				// *shrug*
-				for (InnerClassMapping icm : tlcm.getInnerClassMappings()) {
-					icm.complete(ctx.inheritanceProvider());
-					for (InnerClassMapping iicm : icm.getInnerClassMappings()) {
-						iicm.complete(ctx.inheritanceProvider());
-						for (InnerClassMapping iiicm : iicm.getInnerClassMappings()) {
-							iiicm.complete(ctx.inheritanceProvider());
-							for (InnerClassMapping iiiicm : iiicm.getInnerClassMappings()) {
-								iiiicm.complete(ctx.inheritanceProvider());
-							}
-						}
-					}
-				}
+				completeRecursively(tlcm, ctx.inheritanceProvider());
 			}
 			return new JarEntryTransformer() {};
 		});
@@ -210,7 +238,20 @@ public class Forgery {
 								} else {
 									String name = mapping.substring(semi+1, paren);
 									String desc = mapping.substring(paren);
-									if (clazz != null) {
+									if (name.equals("<init>") || name.equals("<clinit>")) {
+										MethodDescriptor parsed = new MethodDescriptorReader(desc).read();
+										List<FieldType> newTypes = new ArrayList<>();
+										org.cadixdev.bombe.type.Type newReturnType = remap(parsed.getReturnType());
+										for (FieldType ft : parsed.getParamTypes()) {
+											newTypes.add(remap(ft));
+										}
+										desc = new MethodDescriptor(newTypes, newReturnType).toString();
+										if (clazz != null) {
+											ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+											cm.complete(ctx.inheritanceProvider());
+											clazz = cm.getFullDeobfuscatedName();
+										}
+									} else if (clazz != null) {
 										ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
 										cm.complete(ctx.inheritanceProvider());
 										MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
@@ -233,8 +274,8 @@ public class Forgery {
 									}
 									remapped = (clazz == null ? "" : "L"+clazz+";")+name+desc;
 								}
-								if (remapped.contains("class_") || remapped.contains("field_") || remapped.contains("method_")) {
-									System.out.println(mapping+" became "+remapped+", which still contains Intermediary names!");
+								if (remapped.contains("class_") || remapped.contains("method_")) {
+									System.out.println(mapping+" became "+remapped+", which still contains obvious Intermediary names!");
 								}
 								nw.put(en2.getKey(), remapped);
 							}
@@ -297,6 +338,21 @@ public class Forgery {
 				return entry;
 			}
 			
+			private <T extends org.cadixdev.bombe.type.Type> T remap(T ty) {
+				if (ty instanceof ObjectType) {
+					ObjectType ot = (ObjectType)ty;
+					Optional<? extends ClassMapping<?, ?>> cm = intToSrg.getClassMapping(ot.getClassName());
+					if (cm.isPresent()) {
+						cm.get().complete(ctx.inheritanceProvider());
+						return (T)new ObjectType(cm.get().getFullDeobfuscatedName());
+					}
+				}
+				if (ty instanceof ArrayType) {
+					return (T)new ArrayType(((ArrayType) ty).getDimCount(), remap(((ArrayType) ty).getComponent()));
+				}
+				return ty;
+			}
+
 			@Override
 			public JarManifestEntry transform(JarManifestEntry entry) {
 				Attributes attr = entry.getManifest().getMainAttributes();
@@ -317,47 +373,57 @@ public class Forgery {
 			public JarClassEntry transform(JarClassEntry entry) {
 				ClassReader cr = new ClassReader(entry.getContents());
 				ClassNode node = new ClassNode();
-				boolean changed = false;
+				final AtomicBoolean changed = new AtomicBoolean(false);
 				cr.accept(node, 0);
-				if (node.interfaces != null && node.interfaces.contains("net/fabricmc/api/ModInitializer")) {
-					node.interfaces.remove("net/fabricmc/api/ModInitializer");
-					if (node.visibleAnnotations == null) node.visibleAnnotations = new ArrayList<>();
-					AnnotationNode atMod = new AnnotationNode("Lnet/minecraftforge/fml/common/Mod;");
-					atMod.values = new ArrayList<>();
-					atMod.values.add("value");
-					atMod.values.add(fabricMod.getString("id"));
-					node.visibleAnnotations.add(atMod);
-					String originalSuper = node.superName;
-					node.superName = "com/unascribed/forgery/ConvertedModInitializer";
-					for (MethodNode mn : node.methods) {
-						if (mn.name.equals("<init>")) {
-							// correct super() calls
-							for (AbstractInsnNode insn : mn.instructions) {
-								if (insn.getOpcode() == Opcodes.INVOKESPECIAL) {
-									MethodInsnNode min = (MethodInsnNode)insn;
-									if (min.name.equals("<init>") && min.owner.equals(originalSuper)) {
-										min.owner = node.superName;
+				if (node.interfaces != null) {
+					if (node.interfaces.contains("net/fabricmc/api/ModInitializer")) {
+						node.interfaces.remove("net/fabricmc/api/ModInitializer");
+						if (node.visibleAnnotations == null) node.visibleAnnotations = new ArrayList<>();
+						AnnotationNode atMod = new AnnotationNode("Lnet/minecraftforge/fml/common/Mod;");
+						atMod.values = new ArrayList<>();
+						atMod.values.add("value");
+						atMod.values.add(fabricMod.getString("id"));
+						node.visibleAnnotations.add(atMod);
+						String originalSuper = node.superName;
+						node.superName = pkgBin+"/ConvertedModInitializer";
+						for (MethodNode mn : node.methods) {
+							if (mn.name.equals("<init>")) {
+								// correct super() calls
+								for (AbstractInsnNode insn : mn.instructions) {
+									if (insn.getOpcode() == Opcodes.INVOKESPECIAL) {
+										MethodInsnNode min = (MethodInsnNode)insn;
+										if (min.name.equals("<init>") && min.owner.equals(originalSuper)) {
+											min.owner = node.superName;
+										}
 									}
 								}
 							}
 						}
+						changed.set(true);
 					}
-					changed = true;
-				} else if (node.name.equals("com/unascribed/fabrication/Agnos")) {
+				}
+				if (node.name.equals(pkgBin+"/Agnos")) {
 					for (MethodNode mn : node.methods) {
 						if (mn.name.equals("<clinit>")) {
 							for (AbstractInsnNode insn : mn.instructions) {
 								if (insn.getOpcode() == Opcodes.NEW) {
 									TypeInsnNode tin = (TypeInsnNode)insn;
-									tin.desc = tin.desc.replace("fabrication/FabricAgnos", "forgery/ForgeAgnos");
+									tin.desc = tin.desc.replace("FabricAgnos", "ForgeAgnos");
 								} else if (insn.getOpcode() == Opcodes.INVOKESPECIAL) {
 									MethodInsnNode min = (MethodInsnNode)insn;
-									min.owner = min.owner.replace("fabrication/FabricAgnos", "forgery/ForgeAgnos");
+									min.owner = min.owner.replace("FabricAgnos", "ForgeAgnos");
 								}
 							}
 						}
 					}
-					changed = true;
+					changed.set(true);
+				}
+				node.visibleAnnotations = hoist(node.invisibleAnnotations, node.visibleAnnotations, () -> changed.set(true));
+				for (MethodNode mn : node.methods) {
+					mn.visibleAnnotations = hoist(mn.invisibleAnnotations, mn.visibleAnnotations, () -> changed.set(true));
+				}
+				for (FieldNode fn : node.fields) {
+					fn.visibleAnnotations = hoist(fn.invisibleAnnotations, fn.visibleAnnotations, () -> changed.set(true));
 				}
 				if (node.invisibleAnnotations != null) {
 					for (AnnotationNode ann : node.invisibleAnnotations) {
@@ -380,7 +446,7 @@ public class Forgery {
 															renamedMethods.put(mn.name+mn.desc, mm.getDeobfuscatedName()+"\0"+mm.getDeobfuscatedDescriptor());
 															mn.name = mm.getDeobfuscatedName();
 															mn.desc = mm.getDeobfuscatedDescriptor();
-															changed = true;
+															changed.set(true);
 															break;
 														}
 													}
@@ -391,7 +457,7 @@ public class Forgery {
 														renamedFields.put(fn.name, fm.getDeobfuscatedName());
 														fn.name = fm.getDeobfuscatedName();
 														fn.desc = fm.getDeobfuscatedSignature().getType().get().toString();
-														changed = true;
+														changed.set(true);
 													}
 												}
 												for (MethodNode mn : node.methods) {
@@ -410,6 +476,7 @@ public class Forgery {
 																		if (fm != null) {
 																			fin.name = fm.getDeobfuscatedName();
 																			fin.desc = fm.getDeobfuscatedSignature().getType().get().toString();
+																			changed.set(true);
 																		}
 																	}
 																}
@@ -430,6 +497,7 @@ public class Forgery {
 																		if (mm != null) {
 																			min.name = mm.getDeobfuscatedName();
 																			min.desc = mm.getDeobfuscatedDescriptor();
+																			changed.set(true);
 																		}
 																	}
 																}
@@ -445,12 +513,31 @@ public class Forgery {
 						}
 					}
 				}
-				if (changed) {
+				if (changed.get()) {
 					ClassWriter cw = new ClassWriter(0);
 					node.accept(cw);
 					return new JarClassEntry(entry.getName(), entry.getTime(), cw.toByteArray());
 				}
 				return entry;
+			}
+
+			private List<AnnotationNode> hoist(List<AnnotationNode> invisible, List<AnnotationNode> visible, Runnable changed) {
+				if (invisible == null) return visible;
+				List<AnnotationNode> toHoist = new ArrayList<>();
+				for (AnnotationNode ann : invisible) {
+					if (ann.desc.equals("Lnet/minecraftforge/api/distmarker/OnlyIn;")) {
+						toHoist.add(ann);
+					}
+				}
+				if (!toHoist.isEmpty()) {
+					if (visible == null) visible = new ArrayList<>();
+					for (AnnotationNode ann : toHoist) {
+						invisible.remove(ann);
+						visible.add(ann);
+					}
+					changed.run();
+				}
+				return visible;
 			}
 			
 		});
@@ -460,7 +547,7 @@ public class Forgery {
 		ZipFile runtime = new ZipFile(args[4]);
 		for (ZipEntry ze : (Iterable<ZipEntry>)(Iterable)runtime.entries()::asIterator) {
 			if (ze.getName().startsWith("META-INF")) continue;
-			if (ze.getName().endsWith("fabrication/Agnos.class")) continue;
+			if (ze.getName().endsWith("/Agnos.class")) continue;
 			if (ze.isDirectory()) {
 				Files.createDirectories(out.getPath(ze.getName()));
 				continue;
@@ -469,13 +556,20 @@ public class Forgery {
 				runtime.getInputStream(ze).transferTo(os);
 			}
 		}
-		Path p = out.getPath("com/unascribed/fabrication/FabricAgnos.class");
+		Path p = out.getPath(pkgBin+"/FabricAgnos.class");
 		if (Files.exists(p)) {
 			Files.delete(p);
 		}
 		runtime.close();
 		out.close();
 		System.out.println("Done!");
+	}
+
+	private static void completeRecursively(ClassMapping<?, ?> cm, InheritanceProvider inh) {
+		cm.complete(inh);
+		for (ClassMapping<?, ?> child : cm.getInnerClassMappings()) {
+			child.complete(inh);
+		}
 	}
 	
 }
