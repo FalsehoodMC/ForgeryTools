@@ -199,6 +199,7 @@ public class Forgery {
 							JsonObject obj = (JsonObject)en.getValue();
 							for (Map.Entry<String, Object> en2 : obj.entrySet()) {
 								String mapping = (String)en2.getValue();
+								if (mapping.equals("<init>") || mapping.equals("<clinit>")) continue;
 								String remapped;
 								int semi = mapping.indexOf(';');
 								String clazz;
@@ -211,30 +212,38 @@ public class Forgery {
 								int paren = mapping.indexOf('(');
 								if (paren == -1) {
 									int colon = mapping.indexOf(':');
-									String name = mapping.substring(semi+1, colon);
-									String type = mapping.substring(colon+1);
-									if (clazz != null) {
+									if (colon == -1) {
+										clazz = mapping;
 										ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
 										cm.complete(ctx.inheritanceProvider());
-										FieldMapping fm = cm.getFieldMapping(FieldSignature.of(name, type)).orElse(null);
-										if (fm != null) {
-											name = fm.getDeobfuscatedName();
-											type = fm.getDeobfuscatedSignature().getType().get().toString();
-										}
 										clazz = cm.getFullDeobfuscatedName();
+										remapped = clazz;
 									} else {
-										FieldSignature sig = FieldSignature.of(name, type);
-										for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
+										String name = mapping.substring(semi+1, colon);
+										String type = mapping.substring(colon+1);
+										if (clazz != null) {
+											ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
 											cm.complete(ctx.inheritanceProvider());
-											if (cm.hasFieldMapping(sig)) {
-												FieldMapping fm = cm.getFieldMapping(sig).get();
+											FieldMapping fm = cm.getFieldMapping(FieldSignature.of(name, type)).orElse(null);
+											if (fm != null) {
 												name = fm.getDeobfuscatedName();
 												type = fm.getDeobfuscatedSignature().getType().get().toString();
-												break;
+											}
+											clazz = cm.getFullDeobfuscatedName();
+										} else {
+											FieldSignature sig = FieldSignature.of(name, type);
+											for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
+												cm.complete(ctx.inheritanceProvider());
+												if (cm.hasFieldMapping(sig)) {
+													FieldMapping fm = cm.getFieldMapping(sig).get();
+													name = fm.getDeobfuscatedName();
+													type = fm.getDeobfuscatedSignature().getType().get().toString();
+													break;
+												}
 											}
 										}
+										remapped = (clazz == null ? "" : "L"+clazz+";")+name+":"+type;
 									}
-									remapped = (clazz == null ? "" : "L"+clazz+";")+name+":"+type;
 								} else {
 									String name = mapping.substring(semi+1, paren);
 									String desc = mapping.substring(paren);
@@ -430,10 +439,18 @@ public class Forgery {
 						if (ann.desc.equals("Lorg/spongepowered/asm/mixin/Mixin;")) {
 							for (int i = 0; i < ann.values.size(); i += 2) {
 								String k = (String)ann.values.get(i);
-								if ("value".equals(k)) {
-									List<Type> types = (List<Type>)ann.values.get(i+1);
-									for (Type t : types) {
-										ClassMapping<?, ?> cm2 = srgToInt.getTopLevelClassMapping(t.getClassName()).orElse(null);
+								if ("value".equals(k) || "targets".equals(k)) {
+									List<String> targets;
+									if ("value".equals(k)) {
+										targets = new ArrayList<>();
+										for (Type t : (List<Type>)ann.values.get(i+1)) {
+											targets.add(t.getClassName());
+										}
+									} else {
+										targets = (List<String>)ann.values.get(i+1);
+									}
+									for (String tgt : targets) {
+										ClassMapping<?, ?> cm2 = srgToInt.getTopLevelClassMapping(tgt).orElse(null);
 										if (cm2 != null) {
 											ClassMapping<?, ?> cm = intToSrg.getTopLevelClassMapping(cm2.getFullDeobfuscatedName()).orElse(null);
 											cm.complete(ctx.inheritanceProvider());
