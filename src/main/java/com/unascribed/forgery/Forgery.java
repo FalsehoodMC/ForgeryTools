@@ -33,9 +33,11 @@ package com.unascribed.forgery;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
@@ -52,11 +54,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.jar.Attributes;
+import java.util.jar.JarFile;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import org.cadixdev.atlas.Atlas;
 import org.cadixdev.atlas.util.NIOHelper;
 import org.cadixdev.bombe.analysis.InheritanceProvider;
+import org.cadixdev.bombe.asm.analysis.ClassProviderInheritanceProvider;
+import org.cadixdev.bombe.asm.jar.JarFileClassProvider;
 import org.cadixdev.bombe.jar.JarClassEntry;
 import org.cadixdev.bombe.jar.JarEntryTransformer;
 import org.cadixdev.bombe.jar.JarManifestEntry;
@@ -105,7 +110,7 @@ import net.fabricmc.mapping.tree.TinyMappingFactory;
 public class Forgery {
 
 	public static void main(String[] args) throws IOException, JsonParserException {
-		System.err.println("Forgery v0.1.0");
+		System.err.println("Forgery v0.1.1");
 		System.err.println("NOTICE: Forgery is NOT a silver bullet. It is not a magical Fabric-to-Forge converter. For a mod to successfully convert with Forgery, it must have changes made to it to work on both loaders. Forgery simply facilitates remapping and has a few runtime helpers.");
 		if (args.length != 7) {
 			System.err.println("Forgery requires seven arguments. Input Fabric mod, output Forge mod, Intermediary tiny mappings, MCP mcp_mappings.tsrg, Forgery runtime JAR, Intermediary remapped Minecraft JAR, package name.");
@@ -126,11 +131,22 @@ public class Forgery {
 		JsonObject fabricMod = JsonParser.object().from(in.getInputStream(in.getEntry("fabric.mod.json")));
 		JsonObject mixins = null;
 		String refmapFile;
+		String refmapStr;
 		if (fabricMod.has("mixins") && !fabricMod.getArray("mixins").isEmpty()) {
 			mixins = JsonParser.object().from(in.getInputStream(in.getEntry(fabricMod.getArray("mixins").getString(0))));
 			refmapFile = mixins.getString("refmap");
+			if (refmapFile != null) {
+				ByteArrayOutputStream baos = new ByteArrayOutputStream();
+				try (InputStream is = in.getInputStream(in.getEntry(refmapFile))) {
+					is.transferTo(baos);
+				}
+				refmapStr = new String(baos.toByteArray());
+			} else {
+				refmapStr = null;
+			}
 		} else {
 			refmapFile = null;
+			refmapStr = null;
 		}
 		in.close();
 		System.out.println("Building mappings...");
@@ -140,6 +156,7 @@ public class Forgery {
 				.withMethodMergeStrategy(MethodMergeStrategy.LOOSE)
 				.withFieldMergeStrategy(FieldMergeStrategy.LOOSE)
 				.build()).merge();
+		Map<String, String> yarnToInt = new HashMap<>();
 //		new TSrgWriter(new FileWriter("merged.tsrg")).write(intToSrg);
 		MappingSet srgToInt = intToSrg.reverse();
 		intToSrg.createTopLevelClassMapping("net/fabricmc/api/Environment", "net/minecraftforge/api/distmarker/OnlyIn");
@@ -150,6 +167,117 @@ public class Forgery {
 		System.out.println("Remapping...");
 		Atlas a = new Atlas();
 		a.getClasspath().add(new File(args[5]).toPath());
+		
+		JsonObject refmap;
+		if (refmapStr != null) {
+			InheritanceProvider inh = new ClassProviderInheritanceProvider(new JarFileClassProvider(new JarFile(new File(args[5]))));
+			refmap = JsonParser.object().from(refmapStr);
+			JsonObject nwMappings = new JsonObject();
+			JsonObject mappings = refmap.getObject("mappings");
+			for (Map.Entry<String, Object> en : mappings.entrySet()) {
+				JsonObject nw = new JsonObject();
+				nwMappings.put(en.getKey(), nw);
+				JsonObject obj = (JsonObject)en.getValue();
+				for (Map.Entry<String, Object> en2 : obj.entrySet()) {
+					String mapping = (String)en2.getValue();
+					if (mapping.equals("<init>") || mapping.equals("<clinit>")) continue;
+					String remapped;
+					int semi = mapping.indexOf(';');
+					String clazz;
+					if (mapping.startsWith("L")) {
+						clazz = mapping.substring(1, semi);
+					} else {
+						clazz = null;
+						semi = -1;
+					}
+					int paren = mapping.indexOf('(');
+					if (paren == -1) {
+						int colon = mapping.indexOf(':');
+						if (colon == -1) {
+							clazz = mapping;
+							ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+							cm.complete(inh);
+							System.out.println(en2.getKey()+" = "+clazz);
+							yarnToInt.put(en2.getKey(), clazz);
+							clazz = cm.getFullDeobfuscatedName();
+							remapped = clazz;
+						} else {
+							String name = mapping.substring(semi+1, colon);
+							String type = mapping.substring(colon+1);
+							if (clazz != null) {
+								ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+								cm.complete(inh);
+								FieldMapping fm = cm.getFieldMapping(FieldSignature.of(name, type)).orElse(null);
+								if (fm != null) {
+									name = fm.getDeobfuscatedName();
+									type = fm.getDeobfuscatedSignature().getType().get().toString();
+								}
+								clazz = cm.getFullDeobfuscatedName();
+							} else {
+								FieldSignature sig = FieldSignature.of(name, type);
+								for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
+									cm.complete(inh);
+									if (cm.hasFieldMapping(sig)) {
+										FieldMapping fm = cm.getFieldMapping(sig).get();
+										name = fm.getDeobfuscatedName();
+										type = fm.getDeobfuscatedSignature().getType().get().toString();
+										break;
+									}
+								}
+							}
+							remapped = (clazz == null ? "" : "L"+clazz+";")+name+":"+type;
+						}
+					} else {
+						String name = mapping.substring(semi+1, paren);
+						String desc = mapping.substring(paren);
+						if (name.equals("<init>") || name.equals("<clinit>")) {
+							MethodDescriptor parsed = new MethodDescriptorReader(desc).read();
+							List<FieldType> newTypes = new ArrayList<>();
+							org.cadixdev.bombe.type.Type newReturnType = remap(parsed.getReturnType(), inh, intToSrg);
+							for (FieldType ft : parsed.getParamTypes()) {
+								newTypes.add(remap(ft, inh, intToSrg));
+							}
+							desc = new MethodDescriptor(newTypes, newReturnType).toString();
+							if (clazz != null) {
+								ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+								cm.complete(inh);
+								clazz = cm.getFullDeobfuscatedName();
+							}
+						} else if (clazz != null) {
+							ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+							cm.complete(inh);
+							MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
+							if (mm != null) {
+								name = mm.getDeobfuscatedName();
+								desc = mm.getDeobfuscatedDescriptor();
+							}
+							clazz = cm.getFullDeobfuscatedName();
+						} else {
+							MethodSignature sig = MethodSignature.of(name, desc);
+							for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
+								cm.complete(inh);
+								if (cm.hasMethodMapping(sig)) {
+									MethodMapping mm = cm.getMethodMapping(sig).get();
+									name = mm.getDeobfuscatedName();
+									desc = mm.getDeobfuscatedDescriptor();
+									break;
+								}
+							}
+						}
+						remapped = (clazz == null ? "" : "L"+clazz+";")+name+desc;
+					}
+					if (remapped.contains("class_") || remapped.contains("method_")) {
+						System.out.println(mapping+" became "+remapped+", which still contains obvious Intermediary names!");
+					}
+					nw.put(en2.getKey(), remapped);
+				}
+			}
+			refmap.put("mappings", nwMappings);
+			refmap.getObject("data").put("named:srg", nwMappings.clone());
+		} else {
+			refmap = null;
+		}
+		
 		a.install(ctx -> {
 			for (TopLevelClassMapping tlcm : srgToInt.getTopLevelClassMappings()) {
 				completeRecursively(tlcm, ctx.inheritanceProvider());
@@ -189,112 +317,7 @@ public class Forgery {
 					}
 					return new JarResourceEntry("META-INF/mods.toml", entry.getTime(), toml.toString().getBytes());
 				} else if (entry.getName().equals(refmapFile)) {
-					try {
-						JsonObject refmap = JsonParser.object().from(new String(entry.getContents()));
-						JsonObject nwMappings = new JsonObject();
-						JsonObject mappings = refmap.getObject("mappings");
-						for (Map.Entry<String, Object> en : mappings.entrySet()) {
-							JsonObject nw = new JsonObject();
-							nwMappings.put(en.getKey(), nw);
-							JsonObject obj = (JsonObject)en.getValue();
-							for (Map.Entry<String, Object> en2 : obj.entrySet()) {
-								String mapping = (String)en2.getValue();
-								if (mapping.equals("<init>") || mapping.equals("<clinit>")) continue;
-								String remapped;
-								int semi = mapping.indexOf(';');
-								String clazz;
-								if (mapping.startsWith("L")) {
-									clazz = mapping.substring(1, semi);
-								} else {
-									clazz = null;
-									semi = -1;
-								}
-								int paren = mapping.indexOf('(');
-								if (paren == -1) {
-									int colon = mapping.indexOf(':');
-									if (colon == -1) {
-										clazz = mapping;
-										ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-										cm.complete(ctx.inheritanceProvider());
-										clazz = cm.getFullDeobfuscatedName();
-										remapped = clazz;
-									} else {
-										String name = mapping.substring(semi+1, colon);
-										String type = mapping.substring(colon+1);
-										if (clazz != null) {
-											ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-											cm.complete(ctx.inheritanceProvider());
-											FieldMapping fm = cm.getFieldMapping(FieldSignature.of(name, type)).orElse(null);
-											if (fm != null) {
-												name = fm.getDeobfuscatedName();
-												type = fm.getDeobfuscatedSignature().getType().get().toString();
-											}
-											clazz = cm.getFullDeobfuscatedName();
-										} else {
-											FieldSignature sig = FieldSignature.of(name, type);
-											for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
-												cm.complete(ctx.inheritanceProvider());
-												if (cm.hasFieldMapping(sig)) {
-													FieldMapping fm = cm.getFieldMapping(sig).get();
-													name = fm.getDeobfuscatedName();
-													type = fm.getDeobfuscatedSignature().getType().get().toString();
-													break;
-												}
-											}
-										}
-										remapped = (clazz == null ? "" : "L"+clazz+";")+name+":"+type;
-									}
-								} else {
-									String name = mapping.substring(semi+1, paren);
-									String desc = mapping.substring(paren);
-									if (name.equals("<init>") || name.equals("<clinit>")) {
-										MethodDescriptor parsed = new MethodDescriptorReader(desc).read();
-										List<FieldType> newTypes = new ArrayList<>();
-										org.cadixdev.bombe.type.Type newReturnType = remap(parsed.getReturnType());
-										for (FieldType ft : parsed.getParamTypes()) {
-											newTypes.add(remap(ft));
-										}
-										desc = new MethodDescriptor(newTypes, newReturnType).toString();
-										if (clazz != null) {
-											ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-											cm.complete(ctx.inheritanceProvider());
-											clazz = cm.getFullDeobfuscatedName();
-										}
-									} else if (clazz != null) {
-										ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-										cm.complete(ctx.inheritanceProvider());
-										MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
-										if (mm != null) {
-											name = mm.getDeobfuscatedName();
-											desc = mm.getDeobfuscatedDescriptor();
-										}
-										clazz = cm.getFullDeobfuscatedName();
-									} else {
-										MethodSignature sig = MethodSignature.of(name, desc);
-										for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
-											cm.complete(ctx.inheritanceProvider());
-											if (cm.hasMethodMapping(sig)) {
-												MethodMapping mm = cm.getMethodMapping(sig).get();
-												name = mm.getDeobfuscatedName();
-												desc = mm.getDeobfuscatedDescriptor();
-												break;
-											}
-										}
-									}
-									remapped = (clazz == null ? "" : "L"+clazz+";")+name+desc;
-								}
-								if (remapped.contains("class_") || remapped.contains("method_")) {
-									System.out.println(mapping+" became "+remapped+", which still contains obvious Intermediary names!");
-								}
-								nw.put(en2.getKey(), remapped);
-							}
-						}
-						refmap.put("mappings", nwMappings);
-						refmap.getObject("data").put("named:srg", nwMappings.clone());
-						return new JarResourceEntry(entry.getName(), entry.getTime(), JsonWriter.indent("\t").string().value(refmap).done().getBytes());
-					} catch (JsonParserException e) {
-						throw new IllegalArgumentException(e);
-					}
+					return new JarResourceEntry(entry.getName(), entry.getTime(), JsonWriter.indent("\t").string().value(refmap).done().getBytes());
 				} else if (entry.getName().endsWith(".accesswidener")) {
 					try {
 						BufferedReader br = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(entry.getContents())));
@@ -347,21 +370,6 @@ public class Forgery {
 				return entry;
 			}
 			
-			private <T extends org.cadixdev.bombe.type.Type> T remap(T ty) {
-				if (ty instanceof ObjectType) {
-					ObjectType ot = (ObjectType)ty;
-					Optional<? extends ClassMapping<?, ?>> cm = intToSrg.getClassMapping(ot.getClassName());
-					if (cm.isPresent()) {
-						cm.get().complete(ctx.inheritanceProvider());
-						return (T)new ObjectType(cm.get().getFullDeobfuscatedName());
-					}
-				}
-				if (ty instanceof ArrayType) {
-					return (T)new ArrayType(((ArrayType) ty).getDimCount(), remap(((ArrayType) ty).getComponent()));
-				}
-				return ty;
-			}
-
 			@Override
 			public JarManifestEntry transform(JarManifestEntry entry) {
 				Attributes attr = entry.getManifest().getMainAttributes();
@@ -450,72 +458,81 @@ public class Forgery {
 										targets = (List<String>)ann.values.get(i+1);
 									}
 									for (String tgt : targets) {
-										ClassMapping<?, ?> cm2 = srgToInt.getTopLevelClassMapping(tgt).orElse(null);
-										if (cm2 != null) {
-											ClassMapping<?, ?> cm = intToSrg.getTopLevelClassMapping(cm2.getFullDeobfuscatedName()).orElse(null);
-											cm.complete(ctx.inheritanceProvider());
-											if (cm != null) {
-												Map<String, String> renamedMethods = new HashMap<>();
-												Map<String, String> renamedFields = new HashMap<>();
-												for (MethodNode mn : node.methods) {
-													for (MethodMapping mm : cm.getMethodMappings()) {
-														if (mm.getObfuscatedName().equals(mn.name)) {
-															renamedMethods.put(mn.name+mn.desc, mm.getDeobfuscatedName()+"\0"+mm.getDeobfuscatedDescriptor());
-															mn.name = mm.getDeobfuscatedName();
-															mn.desc = mm.getDeobfuscatedDescriptor();
-															changed.set(true);
-															break;
-														}
-													}
-												}
-												for (FieldNode fn : node.fields) {
-													FieldMapping fm = cm.getFieldMapping(fn.name).orElse(null);
-													if (fm != null) {
-														renamedFields.put(fn.name, fm.getDeobfuscatedName());
-														fn.name = fm.getDeobfuscatedName();
-														fn.desc = fm.getDeobfuscatedSignature().getType().get().toString();
+										ClassMapping<?, ?> cm;
+										if (yarnToInt.containsKey(tgt)) {
+											cm = intToSrg.getClassMapping(yarnToInt.get(tgt)).orElse(null);
+											if (cm == null) {
+												continue;
+											}
+										} else {
+											ClassMapping<?, ?> cm2 = srgToInt.getClassMapping(tgt).orElse(null);
+											if (cm2 == null) {
+												continue;
+											}
+											cm = intToSrg.getClassMapping(cm2.getFullDeobfuscatedName()).get();
+										}
+										cm.complete(ctx.inheritanceProvider());
+										if (cm != null) {
+											Map<String, String> renamedMethods = new HashMap<>();
+											Map<String, String> renamedFields = new HashMap<>();
+											for (MethodNode mn : node.methods) {
+												for (MethodMapping mm : cm.getMethodMappings()) {
+													if (mm.getObfuscatedName().equals(mn.name)) {
+														renamedMethods.put(mn.name+mn.desc, mm.getDeobfuscatedName()+"\0"+mm.getDeobfuscatedDescriptor());
+														mn.name = mm.getDeobfuscatedName();
+														mn.desc = mm.getDeobfuscatedDescriptor();
 														changed.set(true);
+														break;
 													}
 												}
-												for (MethodNode mn : node.methods) {
-													for (AbstractInsnNode insn : mn.instructions) {
-														if (insn instanceof FieldInsnNode) {
-															FieldInsnNode fin = (FieldInsnNode)insn;
-															if (renamedFields.containsKey(fin.name)) {
-																fin.name = renamedFields.get(fin.name);
-															}
-															if (fin.name.startsWith("field_") && fin.name.lastIndexOf('_') == 5) {
-																ClassMapping<?, ?> mcm2 = srgToInt.getClassMapping(fin.owner).orElse(null);
-																if (mcm2 != null) {
-																	ClassMapping<?, ?> mcm = intToSrg.getClassMapping(cm2.getDeobfuscatedName()).orElse(null);
-																	if (mcm != null) {
-																		FieldMapping fm = mcm.getFieldMapping(fin.name).orElse(null);
-																		if (fm != null) {
-																			fin.name = fm.getDeobfuscatedName();
-																			fin.desc = fm.getDeobfuscatedSignature().getType().get().toString();
-																			changed.set(true);
-																		}
+											}
+											for (FieldNode fn : node.fields) {
+												FieldMapping fm = cm.getFieldMapping(fn.name).orElse(null);
+												if (fm != null) {
+													renamedFields.put(fn.name, fm.getDeobfuscatedName());
+													fn.name = fm.getDeobfuscatedName();
+													fn.desc = fm.getDeobfuscatedSignature().getType().get().toString();
+													changed.set(true);
+												}
+											}
+											for (MethodNode mn : node.methods) {
+												for (AbstractInsnNode insn : mn.instructions) {
+													if (insn instanceof FieldInsnNode) {
+														FieldInsnNode fin = (FieldInsnNode)insn;
+														if (renamedFields.containsKey(fin.name)) {
+															fin.name = renamedFields.get(fin.name);
+														}
+														if (fin.name.startsWith("field_") && fin.name.lastIndexOf('_') == 5) {
+															ClassMapping<?, ?> mcm2 = srgToInt.getClassMapping(fin.owner).orElse(null);
+															if (mcm2 != null) {
+																ClassMapping<?, ?> mcm = intToSrg.getClassMapping(mcm2.getDeobfuscatedName()).orElse(null);
+																if (mcm != null) {
+																	FieldMapping fm = mcm.getFieldMapping(fin.name).orElse(null);
+																	if (fm != null) {
+																		fin.name = fm.getDeobfuscatedName();
+																		fin.desc = fm.getDeobfuscatedSignature().getType().get().toString();
+																		changed.set(true);
 																	}
 																}
 															}
-														} else if (insn instanceof MethodInsnNode) {
-															MethodInsnNode min = (MethodInsnNode)insn;
-															if (renamedMethods.containsKey(min.name+min.desc)) {
-																String s = renamedMethods.get(min.name+min.desc);
-																min.name = s.substring(0, s.indexOf('\0'));
-																min.desc = s.substring(s.indexOf('\0')+1);
-															}
-															if (min.name.startsWith("method_")) {
-																ClassMapping<?, ?> mcm2 = srgToInt.getClassMapping(min.owner).orElse(null);
-																if (mcm2 != null) {
-																	ClassMapping<?, ?> mcm = intToSrg.getClassMapping(cm2.getDeobfuscatedName()).orElse(null);
-																	if (mcm != null) {
-																		MethodMapping mm = mcm.getMethodMapping(min.name, min.desc).orElse(null);
-																		if (mm != null) {
-																			min.name = mm.getDeobfuscatedName();
-																			min.desc = mm.getDeobfuscatedDescriptor();
-																			changed.set(true);
-																		}
+														}
+													} else if (insn instanceof MethodInsnNode) {
+														MethodInsnNode min = (MethodInsnNode)insn;
+														if (renamedMethods.containsKey(min.name+min.desc)) {
+															String s = renamedMethods.get(min.name+min.desc);
+															min.name = s.substring(0, s.indexOf('\0'));
+															min.desc = s.substring(s.indexOf('\0')+1);
+														}
+														if (min.name.startsWith("method_")) {
+															ClassMapping<?, ?> mcm2 = srgToInt.getClassMapping(min.owner).orElse(null);
+															if (mcm2 != null) {
+																ClassMapping<?, ?> mcm = intToSrg.getClassMapping(mcm2.getDeobfuscatedName()).orElse(null);
+																if (mcm != null) {
+																	MethodMapping mm = mcm.getMethodMapping(min.name, min.desc).orElse(null);
+																	if (mm != null) {
+																		min.name = mm.getDeobfuscatedName();
+																		min.desc = mm.getDeobfuscatedDescriptor();
+																		changed.set(true);
 																	}
 																}
 															}
@@ -580,6 +597,21 @@ public class Forgery {
 		runtime.close();
 		out.close();
 		System.out.println("Done!");
+	}
+	
+	private static <T extends org.cadixdev.bombe.type.Type> T remap(T ty, InheritanceProvider inh, MappingSet mappings) {
+		if (ty instanceof ObjectType) {
+			ObjectType ot = (ObjectType)ty;
+			Optional<? extends ClassMapping<?, ?>> cm = mappings.getClassMapping(ot.getClassName());
+			if (cm.isPresent()) {
+				cm.get().complete(inh);
+				return (T)new ObjectType(cm.get().getFullDeobfuscatedName());
+			}
+		}
+		if (ty instanceof ArrayType) {
+			return (T)new ArrayType(((ArrayType) ty).getDimCount(), remap(((ArrayType) ty).getComponent(), inh, mappings));
+		}
+		return ty;
 	}
 
 	private static void completeRecursively(ClassMapping<?, ?> cm, InheritanceProvider inh) {
