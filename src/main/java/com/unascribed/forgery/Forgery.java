@@ -43,7 +43,6 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -95,8 +94,6 @@ import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.TypeInsnNode;
-
 import com.grack.nanojson.JsonObject;
 import com.grack.nanojson.JsonParser;
 import com.grack.nanojson.JsonParserException;
@@ -419,22 +416,6 @@ public class Forgery {
 						changed.set(true);
 					}
 				}
-				if (node.name.equals(pkgBin+"/Agnos")) {
-					for (MethodNode mn : node.methods) {
-						if (mn.name.equals("<clinit>")) {
-							for (AbstractInsnNode insn : mn.instructions) {
-								if (insn.getOpcode() == Opcodes.NEW) {
-									TypeInsnNode tin = (TypeInsnNode)insn;
-									tin.desc = tin.desc.replace("FabricAgnos", "ForgeAgnos");
-								} else if (insn.getOpcode() == Opcodes.INVOKESPECIAL) {
-									MethodInsnNode min = (MethodInsnNode)insn;
-									min.owner = min.owner.replace("FabricAgnos", "ForgeAgnos");
-								}
-							}
-						}
-					}
-					changed.set(true);
-				}
 				node.visibleAnnotations = hoist(node.invisibleAnnotations, node.visibleAnnotations, () -> changed.set(true));
 				for (MethodNode mn : node.methods) {
 					mn.visibleAnnotations = hoist(mn.invisibleAnnotations, mn.visibleAnnotations, () -> changed.set(true));
@@ -581,7 +562,6 @@ public class Forgery {
 		ZipFile runtime = new ZipFile(args[4]);
 		for (ZipEntry ze : (Iterable<ZipEntry>)(Iterable)runtime.entries()::asIterator) {
 			if (ze.getName().startsWith("META-INF")) continue;
-			if (ze.getName().endsWith("/Agnos.class")) continue;
 			if (ze.isDirectory()) {
 				Files.createDirectories(out.getPath(ze.getName()));
 				continue;
@@ -589,10 +569,6 @@ public class Forgery {
 			try (OutputStream os = Files.newOutputStream(out.getPath(ze.getName()))) {
 				runtime.getInputStream(ze).transferTo(os);
 			}
-		}
-		Path p = out.getPath(pkgBin+"/FabricAgnos.class");
-		if (Files.exists(p)) {
-			Files.delete(p);
 		}
 		runtime.close();
 		out.close();

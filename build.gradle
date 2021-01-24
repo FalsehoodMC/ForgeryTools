@@ -8,7 +8,7 @@ group = 'com.unascribed'
 archivesBaseName = 'Forgery'
 version = '0.0.1'
 
-sourceCompatibility = targetCompatibility = 8
+sourceCompatibility = targetCompatibility = 11
 
 repositories { 
 	mavenCentral()
