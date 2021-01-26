@@ -107,7 +107,7 @@ import net.fabricmc.mapping.tree.TinyMappingFactory;
 public class Forgery {
 
 	public static void main(String[] args) throws IOException, JsonParserException {
-		System.err.println("Forgery v0.1.1");
+		System.err.println("Forgery v0.1.2");
 		System.err.println("NOTICE: Forgery is NOT a silver bullet. It is not a magical Fabric-to-Forge converter. For a mod to successfully convert with Forgery, it must have changes made to it to work on both loaders. Forgery simply facilitates remapping and has a few runtime helpers.");
 		if (args.length != 7) {
 			System.err.println("Forgery requires seven arguments. Input Fabric mod, output Forge mod, Intermediary tiny mappings, MCP mcp_mappings.tsrg, Forgery runtime JAR, Intermediary remapped Minecraft JAR, package name.");
@@ -307,6 +307,7 @@ public class Forgery {
 					for (int i = 0; i < keys.length; i += 2) {
 						String fab = keys[i];
 						String frg = keys[i+1];
+						if (!fabricMod.has(fab)) continue;
 						toml.append(frg);
 						toml.append("=");
 						toml.append(JsonWriter.string(fabricMod.get(fab)));
@@ -371,10 +372,10 @@ public class Forgery {
 			public JarManifestEntry transform(JarManifestEntry entry) {
 				Attributes attr = entry.getManifest().getMainAttributes();
 				attr.putValue("Specification-Title", fabricMod.getString("id"));
-				attr.putValue("Specification-Vendor", fabricMod.getArray("authors").getString(0));
+				if (fabricMod.has("authors")) attr.putValue("Specification-Vendor", fabricMod.getArray("authors").getString(0));
 				attr.putValue("Specification-Version", "1");
 				attr.putValue("Implementation-Title", fabricMod.getString("name"));
-				attr.putValue("Implementation-Vendor", fabricMod.getArray("authors").getString(0));
+				if (fabricMod.has("authors")) attr.putValue("Implementation-Vendor", fabricMod.getArray("authors").getString(0));
 				attr.putValue("Implementation-Version", fabricMod.getString("version"));
 				attr.putValue("Implementation-Timestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ").format(new Date()));
 				if (fabricMod.has("mixins")) {
