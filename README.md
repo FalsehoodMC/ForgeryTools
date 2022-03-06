@@ -16,7 +16,7 @@ Please don't.
 ## Building
 Please don't.
 
-`./gradlew clean capsule`
+`./gradlew clean shadow`
 
 ## Usage
 Please don't.
