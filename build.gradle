@@ -24,15 +24,16 @@ configurations.shadow.extendsFrom configurations.compile
 
 dependencies {
 	compile 'com.grack:nanojson:1.6'
-	compile 'org.ow2.asm:asm:9.0'
-	compile 'org.ow2.asm:asm-tree:9.0'
-	compile 'org.ow2.asm:asm-commons:9.0'
+	compile 'org.ow2.asm:asm:9.2'
+	compile 'org.ow2.asm:asm-tree:9.2'
+	compile 'org.ow2.asm:asm-commons:9.2'
 	
 	compile 'org.cadixdev:lorenz:0.5.6'
 	compile 'org.cadixdev:lorenz-asm:0.5.6'
+	compile 'org.cadixdev:lorenz-io-proguard:0.5.6'
 	compile 'net.fabricmc:lorenz-tiny:3.0.0'
 	
-	compile 'org.cadixdev:atlas:0.3.0-SNAPSHOT'
+	compile 'org.cadixdev:atlas:0.3.0-20210102.221027-6'
 }
 
 jar {

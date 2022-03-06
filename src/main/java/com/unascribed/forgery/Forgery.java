@@ -56,7 +56,7 @@ import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import org.cadixdev.atlas.Atlas;
+import org.cadixdev.atlas.AtlasWithNewASM;
 import org.cadixdev.atlas.util.NIOHelper;
 import org.cadixdev.bombe.analysis.InheritanceProvider;
 import org.cadixdev.bombe.asm.analysis.ClassProviderInheritanceProvider;
@@ -74,7 +74,6 @@ import org.cadixdev.bombe.type.ObjectType;
 import org.cadixdev.bombe.type.signature.FieldSignature;
 import org.cadixdev.bombe.type.signature.MethodSignature;
 import org.cadixdev.lorenz.MappingSet;
-import org.cadixdev.lorenz.io.srg.tsrg.TSrgReader;
 import org.cadixdev.lorenz.merge.FieldMergeStrategy;
 import org.cadixdev.lorenz.merge.MappingSetMerger;
 import org.cadixdev.lorenz.merge.MergeConfig;
@@ -100,6 +99,7 @@ import com.grack.nanojson.JsonParserException;
 import com.grack.nanojson.JsonWriter;
 
 import org.cadixdev.lorenz.asm.LorenzRemapper;
+import org.cadixdev.lorenz.io.proguard.ProGuardReader;
 import net.fabricmc.lorenztiny.TinyMappingsReader;
 import net.fabricmc.mapping.tree.TinyMappingFactory;
 
@@ -107,10 +107,10 @@ import net.fabricmc.mapping.tree.TinyMappingFactory;
 public class Forgery {
 
 	public static void main(String[] args) throws IOException, JsonParserException {
-		System.err.println("Forgery v0.1.2");
-		System.err.println("NOTICE: Forgery is NOT a silver bullet. It is not a magical Fabric-to-Forge converter. For a mod to successfully convert with Forgery, it must have changes made to it to work on both loaders. Forgery simply facilitates remapping and has a few runtime helpers.");
-		if (args.length != 7) {
-			System.err.println("Forgery requires seven arguments. Input Fabric mod, output Forge mod, Intermediary tiny mappings, MCP mcp_mappings.tsrg, Forgery runtime JAR, Intermediary remapped Minecraft JAR, package name.");
+		System.err.println("Forgery v0.2.0");
+		System.err.println("NOTICE: Forgery is NOT a silver bullet. It is not a magical Fabric-to-Forge converter. For a mod to successfully convert with Forgery, it must have changes made to it to work on both loaders. Forgery simply facilitates remapping.");
+		if (args.length != 7 && args.length != 9) {
+			System.err.println("Forgery requires seven (nine for 1.18) arguments. Input Fabric mod, output Forge mod, Intermediary tiny mappings, MCP mcp_mappings.tsrg, Forgery runtime JAR, Intermediary remapped Minecraft JAR, package name, official client mappings (1.18 only), and official server mappings (1.18 only).");
 			System.err.println("You can find the Intermediary mappings in ~/.gradle/caches/fabric-loom/mappings/intermediary-1.16.4-v2.tiny");
 			System.err.println("You can find the MCP joined.tsrg in ~/.gradle/caches/forge_gradle/minecraft_repo/versions/1.16.4/mcp_mappings.tsrg");
 			System.err.println("You can find the Intermediary remapped Minecraft jar in ~/.gradle/caches/fabric-loom/minecraft-1.16.4-intermediary-net.fabricmc.yarn-1.16.4+build.6-v2.jar");
@@ -147,8 +147,18 @@ public class Forgery {
 		}
 		in.close();
 		System.out.println("Building mappings...");
-		MappingSet intToOff = new TinyMappingsReader(TinyMappingFactory.loadWithDetection(new BufferedReader(new FileReader(args[2]))), "official", "intermediary").read().reverse();
-		MappingSet offToSrg = new TSrgReader(new FileReader(args[3])).read();
+		MappingSet offToInt = new TinyMappingsReader(TinyMappingFactory.loadWithDetection(new BufferedReader(new FileReader(args[2]))), "official", "intermediary").read();
+		MappingSet intToOff = offToInt.reverse();
+		MappingSet offToSrg = new TSrg2Reader(new FileReader(args[3])).read();
+		if (args.length == 9) {
+			MappingSet offToMojClient = new ProGuardReader(new FileReader(args[7])).read().reverse();
+			MappingSet offToMojServer = new ProGuardReader(new FileReader(args[8])).read().reverse();
+			MappingSet offToSrgWithMojClasses = offToSrg.copy();
+			for (TopLevelClassMapping cm : offToInt.getTopLevelClassMappings()) {
+				mojifyRecursively(offToSrg, offToMojClient, offToMojServer, offToSrgWithMojClasses, cm);
+			}
+			offToSrg = offToSrgWithMojClasses;
+		}
 		MappingSet intToSrg = MappingSetMerger.create(intToOff, offToSrg, MergeConfig.builder()
 				.withMethodMergeStrategy(MethodMergeStrategy.LOOSE)
 				.withFieldMergeStrategy(FieldMergeStrategy.LOOSE)
@@ -156,18 +166,21 @@ public class Forgery {
 		Map<String, String> yarnToInt = new HashMap<>();
 //		new TSrgWriter(new FileWriter("merged.tsrg")).write(intToSrg);
 		MappingSet srgToInt = intToSrg.reverse();
+		
 		intToSrg.createTopLevelClassMapping("net/fabricmc/api/Environment", "net/minecraftforge/api/distmarker/OnlyIn");
 		TopLevelClassMapping envType = intToSrg.createTopLevelClassMapping("net/fabricmc/api/EnvType", "net/minecraftforge/api/distmarker/Dist");
 		envType.createFieldMapping("SERVER", "DEDICATED_SERVER");
 		intToSrg.createTopLevelClassMapping("io.github.prospector.modmenu.api.ModMenuApi", pkg+".ModMenuAdapter");
 		intToSrg.createTopLevelClassMapping("io.github.prospector.modmenu.api.ConfigScreenFactory", pkg+".ConfigScreenFactory");
+		intToSrg.createTopLevelClassMapping("com.terraformersmc.modmenu.api.ModMenuApi", pkg+".ModMenuAdapter");
+		intToSrg.createTopLevelClassMapping("com.terraformersmc.modmenu.api.ConfigScreenFactory", pkg+".ConfigScreenFactory");
 		System.out.println("Remapping...");
-		Atlas a = new Atlas();
+		AtlasWithNewASM a = new AtlasWithNewASM();
 		a.getClasspath().add(new File(args[5]).toPath());
 		
 		JsonObject refmap;
 		if (refmapStr != null) {
-			InheritanceProvider inh = new ClassProviderInheritanceProvider(new JarFileClassProvider(new JarFile(new File(args[5]))));
+			InheritanceProvider inh = new ClassProviderInheritanceProvider(Opcodes.ASM9, new JarFileClassProvider(new JarFile(new File(args[5]))));
 			refmap = JsonParser.object().from(refmapStr);
 			JsonObject nwMappings = new JsonObject();
 			JsonObject mappings = refmap.getObject("mappings");
@@ -241,14 +254,18 @@ public class Forgery {
 								clazz = cm.getFullDeobfuscatedName();
 							}
 						} else if (clazz != null) {
-							ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-							cm.complete(inh);
-							MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
-							if (mm != null) {
-								name = mm.getDeobfuscatedName();
-								desc = mm.getDeobfuscatedDescriptor();
+							ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).orElse(null);
+							if (cm != null) {
+								cm.complete(inh);
+								MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
+								if (mm != null) {
+									name = mm.getDeobfuscatedName();
+									desc = mm.getDeobfuscatedDescriptor();
+								}
+								clazz = cm.getFullDeobfuscatedName();
+							} else {
+								System.err.println("Class mapping for "+clazz+" not found!");
 							}
-							clazz = cm.getFullDeobfuscatedName();
 						} else {
 							MethodSignature sig = MethodSignature.of(name, desc);
 							for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
@@ -574,6 +591,32 @@ public class Forgery {
 		runtime.close();
 		out.close();
 		System.out.println("Done!");
+	}
+
+	private static void mojifyRecursively(MappingSet offToSrg, MappingSet offToMojClient, MappingSet offToMojServer, MappingSet offToSrgWithMojClasses, ClassMapping<?, ?> cm) {
+		Optional<? extends ClassMapping<?, ?>> mojClass = offToMojClient.getClassMapping(cm.getFullObfuscatedName());
+		String suffix = "";
+		if (!mojClass.isPresent()) {
+			mojClass = offToMojServer.getClassMapping(cm.getFullObfuscatedName());
+			if (!mojClass.isPresent()) {
+				System.out.println("Can't find mapping for "+cm.getFullDeobfuscatedName());
+			} else {
+				suffix = " [server]";
+			}
+		} else {
+			suffix = " [client]";
+		}
+		if (mojClass.isPresent()) {
+			Optional<? extends ClassMapping<?, ?>> srg = offToSrg.getClassMapping(cm.getFullObfuscatedName());
+			System.out.println("obf "+cm.getFullObfuscatedName()+
+					" -> int "+cm.getFullDeobfuscatedName()+
+					" -> srg "+srg.map(ClassMapping::getFullDeobfuscatedName).orElse("?")+
+					" -> moj "+mojClass.get().getFullDeobfuscatedName()+suffix);
+			offToSrgWithMojClasses.getClassMapping(cm.getFullObfuscatedName()).get().setDeobfuscatedName(mojClass.get().getFullDeobfuscatedName());
+		}
+		for (ClassMapping<?, ?> child : cm.getInnerClassMappings()) {
+			mojifyRecursively(offToSrg, offToMojClient, offToMojServer, offToSrgWithMojClasses, child);
+		}
 	}
 	
 	private static <T extends org.cadixdev.bombe.type.Type> T remap(T ty, InheritanceProvider inh, MappingSet mappings) {
