@@ -26,3 +26,7 @@ For 1.16:
 
 For 1.18:
 `java -jar ForgeryTools.jar <path to fabric mod> <path to forge mod output> <intermediary mappings> <mcp mappings> <forgery runtime> <intermediary minecraft jar> <package name> <client mojmap mappings> <server mojmap mappings>`
+
+See the 1.16 version of Fabrication for a [sample build script](https://github.com/unascribed/Fabrication/blob/2.0/1.16/build.sh) and a
+[runtime project](https://github.com/unascribed/Fabrication/tree/2.0/1.16/forgery).
+You can check [SkyChunk](https://github.com/LemmaEOF/Skychunk) for a more minimal example.
