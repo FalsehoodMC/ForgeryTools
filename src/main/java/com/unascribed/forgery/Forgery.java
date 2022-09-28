@@ -40,6 +40,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.StringReader;
 import java.io.UncheckedIOException;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
@@ -145,6 +146,20 @@ public class Forgery {
 			refmapFile = null;
 			refmapStr = null;
 		}
+		String fabAbsRefMapStr = null;
+		String fabRelRefMapStr = null;
+		{
+			ByteArrayOutputStream baos = new ByteArrayOutputStream();
+			try (InputStream is = in.getInputStream(in.getEntry("fabAbsRefMap.txt"))) {
+				is.transferTo(baos);
+			}
+			fabAbsRefMapStr = baos.toString();
+			baos = new ByteArrayOutputStream();
+			try (InputStream is = in.getInputStream(in.getEntry("fabRelRefMap.txt"))) {
+				is.transferTo(baos);
+			}
+			fabRelRefMapStr = baos.toString();
+		}
 		in.close();
 		System.out.println("Building mappings...");
 		MappingSet offToInt = new TinyMappingsReader(TinyMappingFactory.loadWithDetection(new BufferedReader(new FileReader(args[2]))), "official", "intermediary").read();
@@ -190,99 +205,8 @@ public class Forgery {
 				JsonObject obj = (JsonObject)en.getValue();
 				for (Map.Entry<String, Object> en2 : obj.entrySet()) {
 					String mapping = (String)en2.getValue();
-					if (mapping.equals("<init>") || mapping.equals("<clinit>")) continue;
-					String remapped;
-					int semi = mapping.indexOf(';');
-					String clazz;
-					if (mapping.startsWith("L")) {
-						clazz = mapping.substring(1, semi);
-					} else {
-						clazz = null;
-						semi = -1;
-					}
-					int paren = mapping.indexOf('(');
-					if (paren == -1) {
-						int colon = mapping.indexOf(':');
-						if (colon == -1) {
-							clazz = mapping;
-							ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-							cm.complete(inh);
-							System.out.println(en2.getKey()+" = "+clazz);
-							yarnToInt.put(en2.getKey(), clazz);
-							clazz = cm.getFullDeobfuscatedName();
-							remapped = clazz;
-						} else {
-							String name = mapping.substring(semi+1, colon);
-							String type = mapping.substring(colon+1);
-							if (clazz != null) {
-								ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-								cm.complete(inh);
-								FieldMapping fm = cm.getFieldMapping(FieldSignature.of(name, type)).orElse(null);
-								if (fm != null) {
-									name = fm.getDeobfuscatedName();
-									type = fm.getDeobfuscatedSignature().getType().get().toString();
-								}
-								clazz = cm.getFullDeobfuscatedName();
-							} else {
-								FieldSignature sig = FieldSignature.of(name, type);
-								for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
-									cm.complete(inh);
-									if (cm.hasFieldMapping(sig)) {
-										FieldMapping fm = cm.getFieldMapping(sig).get();
-										name = fm.getDeobfuscatedName();
-										type = fm.getDeobfuscatedSignature().getType().get().toString();
-										break;
-									}
-								}
-							}
-							remapped = (clazz == null ? "" : "L"+clazz+";")+name+":"+type;
-						}
-					} else {
-						String name = mapping.substring(semi+1, paren);
-						String desc = mapping.substring(paren);
-						if (name.equals("<init>") || name.equals("<clinit>")) {
-							MethodDescriptor parsed = new MethodDescriptorReader(desc).read();
-							List<FieldType> newTypes = new ArrayList<>();
-							org.cadixdev.bombe.type.Type newReturnType = remap(parsed.getReturnType(), inh, intToSrg);
-							for (FieldType ft : parsed.getParamTypes()) {
-								newTypes.add(remap(ft, inh, intToSrg));
-							}
-							desc = new MethodDescriptor(newTypes, newReturnType).toString();
-							if (clazz != null) {
-								ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
-								cm.complete(inh);
-								clazz = cm.getFullDeobfuscatedName();
-							}
-						} else if (clazz != null) {
-							ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).orElse(null);
-							if (cm != null) {
-								cm.complete(inh);
-								MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
-								if (mm != null) {
-									name = mm.getDeobfuscatedName();
-									desc = mm.getDeobfuscatedDescriptor();
-								}
-								clazz = cm.getFullDeobfuscatedName();
-							} else {
-								System.err.println("Class mapping for "+clazz+" not found!");
-							}
-						} else {
-							MethodSignature sig = MethodSignature.of(name, desc);
-							for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
-								cm.complete(inh);
-								if (cm.hasMethodMapping(sig)) {
-									MethodMapping mm = cm.getMethodMapping(sig).get();
-									name = mm.getDeobfuscatedName();
-									desc = mm.getDeobfuscatedDescriptor();
-									break;
-								}
-							}
-						}
-						remapped = (clazz == null ? "" : "L"+clazz+";")+name+desc;
-					}
-					if (remapped.contains("class_") || remapped.contains("method_")) {
-						System.out.println(mapping+" became "+remapped+", which still contains obvious Intermediary names!");
-					}
+					String remapped = remap(mapping, en2.getKey(), intToSrg, yarnToInt, inh);
+					if (remapped == null) continue;
 					nw.put(en2.getKey(), remapped);
 				}
 			}
@@ -290,6 +214,65 @@ public class Forgery {
 			refmap.getObject("data").put("named:srg", nwMappings.clone());
 		} else {
 			refmap = null;
+		}
+		String fabRelRefMap;
+		String fabAbsRefMap;
+		{
+			InheritanceProvider inh = new ClassProviderInheritanceProvider(Opcodes.ASM9, new JarFileClassProvider(new JarFile(new File(args[5]))));
+			Map<String, String> discardMap = new HashMap<>();
+			if (fabAbsRefMapStr != null) {
+				BufferedReader read = new BufferedReader(new StringReader(fabAbsRefMapStr));
+				StringBuilder write = new StringBuilder();
+				String l = read.readLine();
+				while (l != null) {
+					int i = l.indexOf(' ');
+					if (i == -1) {
+						write.append(l);
+					} else {
+						String remapped = remap(l.substring(i+1), "", intToSrg, discardMap, inh);
+						if (remapped != null) {
+							write.append(l, 0, i).append(' ').append(remapped);
+						} else {
+							write.append(l);
+						}
+					}
+					l = read.readLine();
+					if (l != null) write.append('\n');
+				}
+				String fabRefMap = write.toString();
+				fabAbsRefMap = fabRefMap.isBlank() ? null : fabRefMap;
+			} else {
+				fabAbsRefMap = null;
+			}
+			if (fabRelRefMapStr != null) {
+				BufferedReader read = new BufferedReader(new StringReader(fabRelRefMapStr));
+				StringBuilder write = new StringBuilder();
+				String k = read.readLine();
+				if (k != null) write.append(k).append('\n');
+				String l = k == null ? null : read.readLine();
+				while (l != null) {
+					String[] split = l.split("\t");
+					for (int x=0; x<split.length; x++) {
+						int i = split[x].indexOf(' ');
+						if (i != -1) {
+							String remapped = remap(split[x].substring(i+1), "", intToSrg, discardMap, inh);
+							if (remapped != null) {
+								split[x] = split[x].substring(0, i)+" "+remapped;
+							}
+						}
+					}
+					write.append(String.join("\t", split));
+					k = read.readLine();
+					if (k == null) break;
+					else write.append('\n').append(k);
+					l = read.readLine();
+					if (l != null) write.append('\n');
+				}
+				String fabRefMap = write.toString();
+				fabRelRefMap = fabRefMap.isBlank() ? null : fabRefMap;
+			} else {
+				fabRelRefMap = null;
+			}
 		}
 		
 		a.install(ctx -> {
@@ -333,6 +316,14 @@ public class Forgery {
 					return new JarResourceEntry("META-INF/mods.toml", entry.getTime(), toml.toString().getBytes());
 				} else if (entry.getName().equals(refmapFile)) {
 					return new JarResourceEntry(entry.getName(), entry.getTime(), JsonWriter.indent("\t").string().value(refmap).done().getBytes());
+				} else if (entry.getName().equals("fabRelRefMap.txt")) {
+					if (fabRelRefMap != null) {
+						return new JarResourceEntry(entry.getName(), entry.getTime(), fabRelRefMap.getBytes());
+					}
+				} else if (entry.getName().equals("fabAbsRefMap.txt")) {
+					if (fabAbsRefMap != null) {
+						return new JarResourceEntry(entry.getName(), entry.getTime(), fabAbsRefMap.getBytes());
+					}
 				} else if (entry.getName().endsWith(".accesswidener")) {
 					try {
 						BufferedReader br = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(entry.getContents())));
@@ -639,6 +630,103 @@ public class Forgery {
 		for (ClassMapping<?, ?> child : cm.getInnerClassMappings()) {
 			child.complete(inh);
 		}
+	}
+
+	private static String remap(String mapping, String mappingClass, MappingSet intToSrg, Map<String, String> yarnToInt, InheritanceProvider inh) {
+		if (mapping.equals("<init>") || mapping.equals("<clinit>")) return null;
+		String remapped;
+		int semi = mapping.indexOf(';');
+		String clazz;
+		if (mapping.startsWith("L")) {
+			clazz = mapping.substring(1, semi);
+		} else {
+			clazz = null;
+			semi = -1;
+		}
+		int paren = mapping.indexOf('(');
+		if (paren == -1) {
+			int colon = mapping.indexOf(':');
+			if (colon == -1) {
+				clazz = mapping;
+				ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+				cm.complete(inh);
+				System.out.println(mappingClass + " = " + clazz);
+				yarnToInt.put(mappingClass, clazz);
+				clazz = cm.getFullDeobfuscatedName();
+				remapped = clazz;
+			} else {
+				String name = mapping.substring(semi+1, colon);
+				String type = mapping.substring(colon+1);
+				if (clazz != null) {
+					ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+					cm.complete(inh);
+					FieldMapping fm = cm.getFieldMapping(FieldSignature.of(name, type)).orElse(null);
+					if (fm != null) {
+						name = fm.getDeobfuscatedName();
+						type = fm.getDeobfuscatedSignature().getType().get().toString();
+					}
+					clazz = cm.getFullDeobfuscatedName();
+				} else {
+					FieldSignature sig = FieldSignature.of(name, type);
+					for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
+						cm.complete(inh);
+						if (cm.hasFieldMapping(sig)) {
+							FieldMapping fm = cm.getFieldMapping(sig).get();
+							name = fm.getDeobfuscatedName();
+							type = fm.getDeobfuscatedSignature().getType().get().toString();
+							break;
+						}
+					}
+				}
+				remapped = (clazz == null ? "" : "L"+clazz+";")+name+":"+type;
+			}
+		} else {
+			String name = mapping.substring(semi+1, paren);
+			String desc = mapping.substring(paren);
+			if (name.equals("<init>") || name.equals("<clinit>")) {
+				MethodDescriptor parsed = new MethodDescriptorReader(desc).read();
+				List<FieldType> newTypes = new ArrayList<>();
+				org.cadixdev.bombe.type.Type newReturnType = remap(parsed.getReturnType(), inh, intToSrg);
+				for (FieldType ft : parsed.getParamTypes()) {
+					newTypes.add(remap(ft, inh, intToSrg));
+				}
+				desc = new MethodDescriptor(newTypes, newReturnType).toString();
+				if (clazz != null) {
+					ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).get();
+					cm.complete(inh);
+					clazz = cm.getFullDeobfuscatedName();
+				}
+			} else if (clazz != null) {
+				ClassMapping<?, ?> cm = intToSrg.getClassMapping(clazz).orElse(null);
+				if (cm != null) {
+					cm.complete(inh);
+					MethodMapping mm = cm.getMethodMapping(name, desc).orElse(null);
+					if (mm != null) {
+						name = mm.getDeobfuscatedName();
+						desc = mm.getDeobfuscatedDescriptor();
+					}
+					clazz = cm.getFullDeobfuscatedName();
+				} else {
+					System.err.println("Class mapping for "+clazz+" not found!");
+				}
+			} else {
+				MethodSignature sig = MethodSignature.of(name, desc);
+				for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
+					cm.complete(inh);
+					if (cm.hasMethodMapping(sig)) {
+						MethodMapping mm = cm.getMethodMapping(sig).get();
+						name = mm.getDeobfuscatedName();
+						desc = mm.getDeobfuscatedDescriptor();
+						break;
+					}
+				}
+			}
+			remapped = (clazz == null ? "" : "L"+clazz+";")+name+desc;
+		}
+		if (remapped.contains("class_") || remapped.contains("method_")) {
+			System.out.println(mapping+" became "+remapped+", which still contains obvious Intermediary names!");
+		}
+		return remapped;
 	}
 	
 }
