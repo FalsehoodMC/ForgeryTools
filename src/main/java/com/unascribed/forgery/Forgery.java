@@ -47,16 +47,23 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+
+import net.fabricmc.mappingio.MappingReader;
+import net.fabricmc.mappingio.tree.MemoryMappingTree;
 import org.cadixdev.atlas.AtlasWithNewASM;
 import org.cadixdev.atlas.util.NIOHelper;
 import org.cadixdev.bombe.analysis.InheritanceProvider;
@@ -81,6 +88,7 @@ import org.cadixdev.lorenz.merge.MergeConfig;
 import org.cadixdev.lorenz.merge.MethodMergeStrategy;
 import org.cadixdev.lorenz.model.ClassMapping;
 import org.cadixdev.lorenz.model.FieldMapping;
+import org.cadixdev.lorenz.model.InnerClassMapping;
 import org.cadixdev.lorenz.model.MethodMapping;
 import org.cadixdev.lorenz.model.TopLevelClassMapping;
 import org.objectweb.asm.ClassReader;
@@ -102,7 +110,6 @@ import com.grack.nanojson.JsonWriter;
 import org.cadixdev.lorenz.asm.LorenzRemapper;
 import org.cadixdev.lorenz.io.proguard.ProGuardReader;
 import net.fabricmc.lorenztiny.TinyMappingsReader;
-import net.fabricmc.mapping.tree.TinyMappingFactory;
 
 @SuppressWarnings("deprecation")
 public class Forgery {
@@ -162,7 +169,9 @@ public class Forgery {
 		}
 		in.close();
 		System.out.println("Building mappings...");
-		MappingSet offToInt = new TinyMappingsReader(TinyMappingFactory.loadWithDetection(new BufferedReader(new FileReader(args[2]))), "official", "intermediary").read();
+		MemoryMappingTree mappingTree = new MemoryMappingTree();
+		MappingReader.read(new BufferedReader(new FileReader(args[2])), mappingTree);
+		MappingSet offToInt = new TinyMappingsReader(mappingTree, "official", "intermediary").read();
 		MappingSet intToOff = offToInt.reverse();
 		MappingSet offToSrg = new TSrg2Reader(new FileReader(args[3])).read();
 		if (args.length == 9) {
@@ -670,8 +679,8 @@ public class Forgery {
 					FieldSignature sig = FieldSignature.of(name, type);
 					for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
 						cm.complete(inh);
-						if (cm.hasFieldMapping(sig)) {
-							FieldMapping fm = cm.getFieldMapping(sig).get();
+						FieldMapping fm = getTopOrInnerMapping(inh, cm, m->m.getFieldMapping(sig));
+						if (fm != null) {
 							name = fm.getDeobfuscatedName();
 							type = fm.getDeobfuscatedSignature().getType().get().toString();
 							break;
@@ -712,9 +721,8 @@ public class Forgery {
 			} else {
 				MethodSignature sig = MethodSignature.of(name, desc);
 				for (TopLevelClassMapping cm : intToSrg.getTopLevelClassMappings()) {
-					cm.complete(inh);
-					if (cm.hasMethodMapping(sig)) {
-						MethodMapping mm = cm.getMethodMapping(sig).get();
+					MethodMapping mm = getTopOrInnerMapping(inh, cm, m->m.getMethodMapping(sig));
+					if (mm != null) {
 						name = mm.getDeobfuscatedName();
 						desc = mm.getDeobfuscatedDescriptor();
 						break;
@@ -727,6 +735,27 @@ public class Forgery {
 			System.out.println(mapping+" became "+remapped+", which still contains obvious Intermediary names!");
 		}
 		return remapped;
+	}
+	public static<T> T getTopOrInnerMapping(InheritanceProvider inh, TopLevelClassMapping cm, Function<ClassMapping<?, ?>, Optional<T>> get) {
+		cm.complete(inh);
+		Optional<T> mm = get.apply(cm);
+		if (!mm.isEmpty()) return mm.get();
+		Set<InnerClassMapping> dejavu = new HashSet<>();
+		Collection<InnerClassMapping> icms1 = cm.getInnerClassMappings();
+		List<InnerClassMapping> icms2;
+		while (!icms1.isEmpty()) {
+			icms2 = new ArrayList<>();
+			for (InnerClassMapping icm : icms1) {
+				if (dejavu.add(icm)) {
+					icm.complete(inh);
+					mm = get.apply(icm);
+					if (!mm.isEmpty()) return mm.get();
+					icms2.addAll(icm.getInnerClassMappings());
+				}
+			}
+			icms1 = icms2;
+		}
+		return null;
 	}
 	
 }

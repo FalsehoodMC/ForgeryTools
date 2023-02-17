@@ -28,10 +28,10 @@ dependencies {
 	compile 'org.ow2.asm:asm-tree:9.2'
 	compile 'org.ow2.asm:asm-commons:9.2'
 	
-	compile 'org.cadixdev:lorenz:0.5.6'
-	compile 'org.cadixdev:lorenz-asm:0.5.6'
-	compile 'org.cadixdev:lorenz-io-proguard:0.5.6'
-	compile 'net.fabricmc:lorenz-tiny:3.0.0'
+	compile 'org.cadixdev:lorenz:0.5.8'
+	compile 'org.cadixdev:lorenz-asm:0.5.8'
+	compile 'org.cadixdev:lorenz-io-proguard:0.5.8'
+	compile 'net.fabricmc:lorenz-tiny:4.0.2'
 	
 	compile 'org.cadixdev:atlas:0.3.0-20210102.221027-6'
 }
